@@ -1,5 +1,5 @@
 ---
-- name: mount nfs volume
+- name: mount nfs volume on linux
   hosts: client
   become: yes  
   tasks:
