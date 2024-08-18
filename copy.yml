@@ -1,0 +1,11 @@
+---
+- name: first playbook
+  hosts: client
+  tasks:  
+    - name: Copy file with owner and permissions
+      ansible.builtin.copy:
+        src: /home/ansadmin/abc.txt
+        dest: /home/ansadmin/abc.txt
+        owner: ansadmin
+        group: ansadmin
+        mode: '0644'
