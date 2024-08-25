@@ -1,0 +1,17 @@
+- name: checking service status
+  hosts: all
+  become: yes
+  tasks:
+  - name: checking service status
+    command: systemctl status "{{ item }}"  
+    with_items:
+    - firewalld
+    - httpd
+    - sshd
+    - vsftdp
+    register: result
+    ignore_errors: yes
+  - name: showing report
+    debug:
+      var: result
+
