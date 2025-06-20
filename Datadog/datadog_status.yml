@@ -1,1 +1,24 @@
+---
+- name: Check Datadog Agent Service Status
+  hosts: all
+  become: yes
+  gather_facts: no
+
+  tasks:
+    - name: Check if datadog-agent service is running
+      ansible.builtin.systemd:
+        name: datadog-agent
+        state: started
+        enabled: yes
+      register: datadog_status
+      ignore_errors: yes
+
+    - name: Print Datadog agent status
+      debug:
+        msg: >
+          Datadog Agent is {{
+            'running' if datadog_status.status.ActiveState == 'active'
+            else 'not running or not installed'
+          }}
+      when: datadog_status is defined and datadog_status.status is defined
 
