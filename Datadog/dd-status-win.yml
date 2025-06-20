@@ -1,0 +1,13 @@
+---
+- name: Check Datadog Agent status on Windows
+  hosts: windows_host
+  gather_facts: no
+  tasks:
+    - name: datadog-agent status
+      win_shell: |
+        & "C:\Program Files\Datadog\Datadog Agent\bin\agent.exe" status
+      register: dd_status
+
+    - name: Show Datadog Agent status
+      debug:
+        var: dd_status.stdout
