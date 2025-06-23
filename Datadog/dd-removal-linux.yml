@@ -1,0 +1,37 @@
+---
+- name: Remove Datadog Agent
+  hosts: all
+  become: true
+  tasks:
+
+    - name: Stop Datadog Agent service
+      service:
+        name: datadog-agent
+        state: stopped
+        enabled: no
+      ignore_errors: yes  # In case it's already stopped or missing
+
+    - name: Remove Datadog Agent package (Debian/Ubuntu)
+      apt:
+        name: datadog-agent
+        state: absent
+        purge: yes
+      when: ansible_os_family == "Debian"
+      ignore_errors: yes
+
+    - name: Remove Datadog Agent package (RHEL/CentOS/Fedora)
+      yum:
+        name: datadog-agent
+        state: absent
+      when: ansible_os_family == "RedHat"
+      ignore_errors: yes
+
+    - name: Delete Datadog config directories
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/datadog-agent
+        - /var/log/datadog
+        - /opt/datadog-agent
+      ignore_errors: yes
