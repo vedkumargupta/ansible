@@ -1,0 +1,13 @@
+For windows
+---
+- name: Uninstall Datadog Agent on Windows
+  hosts: windows
+  gather_facts: no
+  tasks:
+
+    - name: Uninstall Datadog Agent
+      win_command: '"C:\Program Files\Datadog\Datadog Agent\bin\agent.exe" uninstall'
+      args:
+        chdir: 'C:\Program Files\Datadog\Datadog Agent\bin\'
+      register: uninstall_result
+      ignore_errors: yes
