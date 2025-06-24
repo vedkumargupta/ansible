@@ -12,7 +12,7 @@ Address:        172.17.175.234#53
 
 Name:   mtlla.abc.com
 Address: 172.27.200.23
-###################################333
+###################################
 
  for i in $(cat ips.txt); do ssh root@$i "uptime"; done
 root@mtllacsotp's password:
