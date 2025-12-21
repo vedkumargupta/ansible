@@ -1,0 +1,200 @@
+---
+- name: Windows Temp Directory Cleanup and Logging
+  hosts: all
+  gather_facts: false
+  vars:
+    usage_threshold_percent: 80
+    cleanup_days: 7
+    log_file_path: "C:\\Ansible_Temp_Cleanup_Log.txt"
+    local_log_file_path: "/tmp/ansible_temp_cleanup.log"  # Adjust path as needed (e.g., "{{ playbook_dir }}/cleanup.log")
+    temp_dir_path: "E:\\Temp"
+    temp_drive_full: "F:"
+  tasks:
+    # --- 2. Pre-Check: Disk Usage ---
+    - name: "5. Pre-Check - Get F: drive info (Size/FreeSpace via WMI)"
+      ansible.windows.win_shell: |
+        $disk = Get-WmiObject -Class Win32_LogicalDisk | Where-Object {$_.DeviceID -eq '{{ temp_drive_full }}'}
+        if ($disk) {
+          $disk | Select-Object DeviceID, Size, FreeSpace | ConvertTo-Json -Compress
+        } else {
+          @{} | ConvertTo-Json -Compress
+        }
+      register: initial_disk_info
+      changed_when: false
+    - name: "6a. Debug - Inspect F: drive info (remove after verifying)"
+      ansible.builtin.debug:
+        msg: |
+          Temp drive: {{ temp_drive_full }}
+          Raw JSON: {{ initial_disk_info.stdout | from_json | default({}) | to_nice_yaml }}
+          Parsed Size: {{ (initial_disk_info.stdout | from_json).Size | default(0) | int }}
+          Parsed FreeSpace: {{ (initial_disk_info.stdout | from_json).FreeSpace | default(0) | int }}
+          Calculated usage: {{ ((( (initial_disk_info.stdout | from_json).Size | default(1) | int ) - ( (initial_disk_info.stdout | from_json).FreeSpace | default(0) | int ) ) / ( (initial_disk_info.stdout | from_json).Size | default(1) | int ) * 100) | round(2) }}
+      changed_when: false
+    - name: "6. Pre-Check - Calculate initial disk usage percentage"
+      ansible.builtin.set_fact:
+        initial_usage: >-
+          {% set disk_json = initial_disk_info.stdout | from_json | default({}) %}
+          {% set total = disk_json.Size | default(1) | int %}
+          {% set used = total - (disk_json.FreeSpace | default(0) | int) %}
+          {% if total > 0 %}{{ (used / total * 100) | round(2) }}{% else %}0{% endif %}
+    - name: "7. Pre-Check - Log initial disk usage"
+      ansible.windows.win_shell: |
+        $LogEntry = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') | [PRE-CHECK] Drive {{ temp_drive_full }}: Initial Usage {{ initial_usage }}%. Threshold: {{ usage_threshold_percent }}%."
+        Add-Content -Path "{{ log_file_path }}" -Value $LogEntry -Encoding UTF8
+      changed_when: false
+    - name: "7a. Log initial usage to Ansible server"
+      ansible.builtin.lineinfile:
+        path: "{{ local_log_file_path }}"
+        line: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }} | [PRE-CHECK] {{ inventory_hostname }} - Drive {{ temp_drive_full }}: Initial Usage {{ initial_usage }}%. Threshold: {{ usage_threshold_percent }}%."
+        create: yes
+      delegate_to: localhost
+      run_once: false  # Log per host
+    # --- 3. Conditional Cleanup ---
+    - name: "8. Debug - Current usage vs threshold"
+      ansible.builtin.debug:
+        msg: "Drive {{ temp_drive_full }} usage: {{ initial_usage }}% — {% if initial_usage | float > usage_threshold_percent %}ABOVE{% else %}BELOW{% endif %} threshold ({{ usage_threshold_percent }}%)"
+    - name: "9. Find files older than {{ cleanup_days }} days in F:\\Temp"
+      ansible.windows.win_find:
+        paths: "{{ temp_dir_path }}"
+        age: "{{ cleanup_days }}d"
+        recurse: yes
+        file_type: file
+        patterns: "*"
+      register: files_to_delete
+      when: initial_usage | float > usage_threshold_percent
+      changed_when: false
+    - name: "10. Log cleanup start (if files found)"
+      ansible.windows.win_shell: |
+        $LogEntry = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') | [CLEANUP] Starting cleanup in '{{ temp_dir_path }}'. Found {{ files_to_delete.files | length }} files older than {{ cleanup_days }} days."
+        Add-Content -Path "{{ log_file_path }}" -Value $LogEntry -Encoding UTF8
+      when:
+        - initial_usage | float > usage_threshold_percent
+        - files_to_delete is defined  # Safe check: skip if task 9 skipped
+        - files_to_delete.files | length > 0
+      changed_when: false
+    - name: "10a. Log cleanup start to Ansible server (if files found)"
+      ansible.builtin.lineinfile:
+        path: "{{ local_log_file_path }}"
+        line: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }} | [CLEANUP] {{ inventory_hostname }} - Starting cleanup in '{{ temp_dir_path }}'. Found {{ files_to_delete.files | length }} files older than {{ cleanup_days }} days."
+        create: yes
+      delegate_to: localhost
+      run_once: false
+      when:
+        - initial_usage | float > usage_threshold_percent
+        - files_to_delete is defined
+        - files_to_delete.files | length > 0
+    - name: "11. Delete old files and log success immediately"
+      ansible.windows.win_shell: |
+        $Files = '{{ files_to_delete.files | map(attribute='path') | list | to_json }}' | ConvertFrom-Json
+        $DeletedCount = 0
+        $DeletedFiles = @()
+        foreach ($file in $Files) {
+            if (Test-Path $file) {
+                Remove-Item -Path $file -Force -ErrorAction SilentlyContinue
+                if (-not (Test-Path $file)) {
+                    $DeletedCount++
+                    $DeletedFiles += $file
+                }
+            }
+        }
+        $Timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+        $LogEntry = "$Timestamp | [CLEANUP] SUCCESS: Deleted $DeletedCount files from '{{ temp_dir_path }}'."
+        Add-Content -Path "{{ log_file_path }}" -Value $LogEntry -Encoding UTF8
+        foreach ($delFile in $DeletedFiles) {
+            $FileLog = "$Timestamp | [CLEANUP-DETAIL] Deleted: $delFile"
+            Add-Content -Path "{{ log_file_path }}" -Value $FileLog -Encoding UTF8
+        }
+        # Output full JSON result for Ansible parsing
+        $Result = @{
+          count = $DeletedCount
+          files = $DeletedFiles
+        } | ConvertTo-Json -Compress
+        Write-Output $Result
+      when:
+        - initial_usage | float > usage_threshold_percent
+        - files_to_delete is defined  # Safe check
+        - files_to_delete.files | length > 0
+      register: cleanup_result
+      changed_when: true
+    - name: "11a. Parse cleanup result to facts"
+      ansible.builtin.set_fact:
+        deleted_count: "{{ (cleanup_result.stdout | from_json).count | default(0) | int }}"
+        deleted_files_list: "{{ (cleanup_result.stdout | from_json).files | default([]) }}"
+      when: cleanup_result is defined and cleanup_result.stdout is defined
+    - name: "11b. Log cleanup success to Ansible server"
+      ansible.builtin.lineinfile:
+        path: "{{ local_log_file_path }}"
+        line: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }} | [CLEANUP] {{ inventory_hostname }} - SUCCESS: Deleted {{ deleted_count }} files from '{{ temp_dir_path }}'."
+        create: yes
+      delegate_to: localhost
+      run_once: false
+      when:
+        - initial_usage | float > usage_threshold_percent
+        - files_to_delete is defined
+        - files_to_delete.files | length > 0
+        - deleted_count is defined
+    - name: "11c. Log each deleted file to Ansible server"
+      ansible.builtin.lineinfile:
+        path: "{{ local_log_file_path }}"
+        line: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }} | [CLEANUP-DETAIL] {{ inventory_hostname }} - Deleted: {{ item }}"
+        create: yes
+      delegate_to: localhost
+      run_once: false
+      loop: "{{ deleted_files_list | default([]) }}"
+      when:
+        - deleted_files_list is defined
+        - deleted_files_list | length > 0
+    # --- 4. Post-Check: Disk Usage ---
+    - name: "12. Post-Check - Get updated F: drive info (Size/FreeSpace via WMI)"
+      ansible.windows.win_shell: |
+        $disk = Get-WmiObject -Class Win32_LogicalDisk | Where-Object {$_.DeviceID -eq '{{ temp_drive_full }}'}
+        if ($disk) {
+          $disk | Select-Object DeviceID, Size, FreeSpace | ConvertTo-Json -Compress
+        } else {
+          @{} | ConvertTo-Json -Compress
+        }
+      register: final_disk_info
+      changed_when: false
+    - name: "13a. Debug - Inspect final F: drive info (remove after verifying)"
+      ansible.builtin.debug:
+        msg: |
+          Temp drive: {{ temp_drive_full }}
+          Raw JSON: {{ final_disk_info.stdout | from_json | default({}) | to_nice_yaml }}
+          Parsed Size: {{ (final_disk_info.stdout | from_json).Size | default(0) | int }}
+          Parsed FreeSpace: {{ (final_disk_info.stdout | from_json).FreeSpace | default(0) | int }}
+          Calculated usage: {{ ((( (final_disk_info.stdout | from_json).Size | default(1) | int ) - ( (final_disk_info.stdout | from_json).FreeSpace | default(0) | int ) ) / ( (final_disk_info.stdout | from_json).Size | default(1) | int ) * 100) | round(2) }}
+      changed_when: false
+    - name: "13. Post-Check - Calculate final disk usage"
+      ansible.builtin.set_fact:
+        final_usage: >-
+          {% set disk_json = final_disk_info.stdout | from_json | default({}) %}
+          {% set total = disk_json.Size | default(1) | int %}
+          {% set used = total - (disk_json.FreeSpace | default(0) | int) %}
+          {% if total > 0 %}{{ (used / total * 100) | round(2) }}{% else %}0{% endif %}
+    - name: "14. Post-Check - Log final disk usage"
+      ansible.windows.win_shell: |
+        $LogEntry = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') | [POST-CHECK] Drive {{ temp_drive_full }}: Final Usage {{ final_usage }}% (was {{ initial_usage }}%)."
+        Add-Content -Path "{{ log_file_path }}" -Value $LogEntry -Encoding UTF8
+      changed_when: false
+    - name: "14a. Log final usage to Ansible server"
+      ansible.builtin.lineinfile:
+        path: "{{ local_log_file_path }}"
+        line: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }} | [POST-CHECK] {{ inventory_hostname }} - Drive {{ temp_drive_full }}: Final Usage {{ final_usage }}% (was {{ initial_usage }}%)."
+        create: yes
+      delegate_to: localhost
+      run_once: false
+    # --- 5. No Action Taken ---
+    - name: "15. Log no action needed"
+      ansible.windows.win_shell: |
+        $LogEntry = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') | [INFO] Disk usage ({{ initial_usage }}%) is below threshold ({{ usage_threshold_percent }}%). No cleanup performed."
+        Add-Content -Path "{{ log_file_path }}" -Value $LogEntry -Encoding UTF8
+      when: initial_usage | float <= usage_threshold_percent
+      changed_when: false
+    - name: "15a. Log no action to Ansible server"
+      ansible.builtin.lineinfile:
+        path: "{{ local_log_file_path }}"
+        line: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }} | [INFO] {{ inventory_hostname }} - Disk usage ({{ initial_usage }}%) is below threshold ({{ usage_threshold_percent }}%). No cleanup performed."
+        create: yes
+      delegate_to: localhost
+      run_once: false
+      when: initial_usage | float <= usage_threshold_percent
